@@ -322,7 +322,7 @@ gitleaks detect --source . -v
 
 ## Author
 
-**Danish** ([@Danishwani1999](https://github.com/Danishwani1999)), a fresher DevOps engineer building hands-on projects.
+**Danish Ahmad Wani** ([@Danishwani1999](https://github.com/Danishwani1999)), a fresher DevOps engineer building hands-on projects.
 
 Other projects: [`k8s-gitops-observability`](https://github.com/Danishwani1999/k8s-gitops-observability), [`Advance_Log_Detector`](https://github.com/Danishwani1999/Advance_Log_Detector)
 
