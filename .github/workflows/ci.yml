@@ -48,6 +48,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      - name: Run tests with coverage
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install --require-hashes -r requirements.txt
+          pip install pytest==8.3.3 pytest-cov==5.0.0
+          pytest --cov=app --cov-report=xml
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@c7ee0f9df90b7aa20e8dcf9695dcfe2e7da5b4f2 # v7.2.1
         env:
