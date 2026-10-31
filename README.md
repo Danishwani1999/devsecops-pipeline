@@ -231,6 +231,7 @@ jobs:
 | `packages: write` only on the `publish` job | The workflow default stays read-only. Only the job that pushes the image gets write access, and it runs only on `main` after every other job passes. |
 | Image tagged with the commit SHA, never `latest` | Each image maps to exactly one commit. |
 | Dependabot for Actions, pip and Docker | Pinned versions go stale. Dependabot opens pull requests that pass the same gates as any other change, and I review the release notes before merging. Its runs cannot read normal Actions secrets, so `SONAR_TOKEN` also exists under Settings, Secrets and variables, Dependabot. |
+| Branch ruleset on `main`: pull request required, `test`, `build`, `gitleaks` and `sonarqube` must pass, no force pushes or deletions, empty bypass list | The gates apply to me too, so "build blocked" is enforced, not just drawn in the diagram. I tested it: a direct push to `main` is rejected with "Changes must be made through a pull request". |
 
 ## Proof that it works: breaking the pipeline on purpose
 
@@ -384,12 +385,11 @@ docker pull ghcr.io/danishwani1999/devsecops-pipeline:<commit-sha>
 - Gitleaks cannot post a comment on pull requests because the workflow token is read-only. The findings still appear in the job summary and the uploaded artifact.
 - The image is published but not deployed anywhere yet.
 - Major-version Dependabot updates are reviewed by hand before merging.
-- Checks are not yet enforced by branch protection, so a direct push to `main` can bypass the pull request flow.
 
 **Roadmap**
 
 - [x] Lock dependencies with hashes (`pip-compile --generate-hashes`, then `pip install --require-hashes`)
-- [ ] Enable branch protection so the three checks are required before merging
+- [x] Enable branch protection so the checks are required before merging
 - [x] Add Dependabot to keep pinned actions and dependencies up to date
 - [x] Publish the image to GitHub Container Registry after all scans pass on `main`
 - [ ] Deploy the published image with Argo CD from the GitOps repo
