@@ -35,7 +35,7 @@ Most pipelines only check that code builds. This one also asks three security qu
 | Is the code itself insecure or low quality? | SonarQube Cloud | Source code (static analysis) |
 | Is the container image shipping known vulnerabilities? | Trivy | OS packages and Python dependencies in the image |
 
-The three checks run in parallel as separate jobs. A failure in any of them turns the pipeline red.
+The checks run in parallel as separate jobs, next to a unit-test job. A failure in any of them turns the pipeline red. When everything passes on `main`, the image is published to GitHub Container Registry, tagged with the commit SHA.
 
 ![Pipeline run on main: build, gitleaks and sonarqube all green](docs/images/00-pipeline-overview.png)
 
@@ -43,28 +43,35 @@ The three checks run in parallel as separate jobs. A failure in any of them turn
 
 ```mermaid
 flowchart LR
-    A["Push to main<br/>or Pull request"] --> B["Gitleaks<br/>secret scan"]
+    A["Push to main<br/>or Pull request"] --> T["Unit tests"]
+    A --> B["Gitleaks<br/>secret scan"]
     A --> C["SonarQube Cloud<br/>code analysis + quality gate"]
     A --> D["Docker build"]
     D --> E["Trivy<br/>image scan"]
-    B --> F{"All checks<br/>pass?"}
+    T --> F{"All checks<br/>pass?"}
+    B --> F
     C --> F
     E --> F
-    F -->|Yes| G["Green: safe to merge"]
     F -->|No| H["Red: build blocked"]
-```
+    F -->|"Yes, pull request"| G["Green: safe to merge"]
+    F -->|"Yes, push to main"| P["Publish image to GHCR<br/>tagged with commit SHA"]
+````
 
 ## Tech stack
 
 | Area | Tool | Version / detail |
 |---|---|---|
-| Application | Python, Flask | Flask 3.0.3 |
-| App server | Gunicorn | 22.0.0 |
+| Application | Python, Flask | Flask 3.1.3 |
+| App server | Gunicorn | 26.2.0 |
 | Container | Docker | Base image `python:3.12-slim` (Debian 13) |
 | CI | GitHub Actions | Workflow in `.github/workflows/ci.yml` |
-| Secret scanning | Gitleaks | `gitleaks/gitleaks-action` v2.3.9 |
-| Code analysis (SAST) | SonarQube Cloud | `SonarSource/sonarqube-scan-action` v7.2.1, "Sonar way" quality gate |
-| Image scanning | Trivy | `aquasecurity/trivy-action` v0.35.0 |
+| Secret scanning | Gitleaks | `gitleaks/gitleaks-action` v3.0.0 |
+| Code analysis (SAST) | SonarQube Cloud | `SonarSource/sonarqube-scan-action` v8.4.0, "Sonar way" quality gate |
+| Image scanning | Trivy | `aquasecurity/trivy-action` v0.36.0 |
+| Tests | pytest, pytest-cov | Unit tests, plus a coverage report sent to SonarQube |
+| Dependency locking | pip-tools | Hash-locked `requirements.txt` generated from `requirements.in` |
+| Updates | Dependabot | Weekly pull requests for Actions, pip and Docker |
+| Registry | GitHub Container Registry | Image tagged with the commit SHA |
 
 Everything used here has a free tier or is open source, and nothing requires a cloud provider account.
 
@@ -73,17 +80,22 @@ Everything used here has a free tier or is open source, and nothing requires a c
 ```
 devsecops-pipeline/
 ├── .github/
-│   └── workflows/
-│       └── ci.yml                 # The pipeline
+│   ├── workflows/
+│   │   └── ci.yml                 # The pipeline
+│   └── dependabot.yml             # Weekly updates for Actions, pip and Docker
 ├── docs/
 │   └── images/                    # Screenshots used in this README
+├── tests/
+│   └── test_app.py                # Unit tests for the Flask routes
 ├── .dockerignore
 ├── .gitignore
-├── Dockerfile                     # Non-root, slim image
+├── Dockerfile                     # Non-root, slim image, healthcheck, hash-checked installs
 ├── LICENSE                        # MIT License
 ├── README.md
 ├── app.py                         # Minimal Flask app
-├── requirements.txt               # Pinned dependencies
+├── pytest.ini                     # Test configuration
+├── requirements.in                # Direct dependencies (edit this one)
+├── requirements.txt               # Hash-locked, generated with pip-compile
 └── sonar-project.properties       # SonarQube Cloud configuration
 ```
 
@@ -104,10 +116,12 @@ The workflow runs on every push to `main` and on every pull request.
 
 | Job | Input | What it does | Output |
 |---|---|---|---|
+| **Test** | `tests/` and the hash-locked `requirements.txt` | Installs the dependencies with `--require-hashes` and runs pytest | Passes if every test passes. The `sonarqube` job runs the tests again with coverage and hands `coverage.xml` to the scan. |
 | **Gitleaks** | Full Git history (`fetch-depth: 0`) | Searches commits for secrets such as tokens and keys | Passes if no leaks. Fails with the rule, file, line and commit of each finding. Secret values are redacted in the log. |
 | **SonarQube Cloud** | Source code (`sonar.sources=.`) | Static analysis, then waits for the quality gate verdict (`sonar.qualitygate.wait=true`) | Passes if the gate passes. Fails if a gate condition fails, for example Security Rating on New Code worse than A. |
 | **Docker build** | `Dockerfile` and `requirements.txt` | Builds the image `devsecops-demo` | Image available to the next step. Fails if the build breaks. |
 | **Trivy** | The built image | Scans OS packages and Python packages. Only HIGH and CRITICAL findings that already have a fix are reported (`ignore-unfixed: true`). | Findings table with library, CVE, installed version and fixed version. Fails the job (`exit-code: '1'`) if any are found. |
+| **Publish** | The four jobs above, on pushes to `main` only | Builds the image and pushes it to GitHub Container Registry, tagged with the commit SHA | `ghcr.io/danishwani1999/devsecops-pipeline:<sha>`. Skipped on pull requests. |
 
 <details>
 <summary>View the full workflow file</summary>
@@ -124,40 +138,73 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install dependencies and run unit tests
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install --require-hashes --only-binary :all: -r requirements.txt
+          pip install --only-binary :all: pytest==8.3.3
+          pytest -q
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build Docker image
         run: docker build -t devsecops-demo .
       - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           image-ref: devsecops-demo
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: '1'
-
   gitleaks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   sonarqube:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: Run tests with coverage
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install --require-hashes --only-binary :all: -r requirements.txt
+          pip install --only-binary :all: pytest==8.3.3 pytest-cov==5.0.0
+          pytest --cov=app --cov-report=xml
       - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@c7ee0f9df90b7aa20e8dcf9695dcfe2e7da5b4f2 # v7.2.1
+        uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  publish:
+    needs: [test, build, gitleaks, sonarqube]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build and push image to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          docker build -t "${IMAGE}:${GITHUB_SHA}" .
+          docker push "${IMAGE}:${GITHUB_SHA}"
 ```
 
 </details>
@@ -179,6 +226,11 @@ jobs:
 | Trivy: HIGH and CRITICAL only, `ignore-unfixed: true` | The build fails only on problems that are serious and fixable, so a red build always has an action to take. |
 | `sonar.qualitygate.wait=true` | Without it the scan job goes green even when SonarQube's verdict is "Quality Gate failed". With it, the verdict blocks the build. |
 | `SONAR_TOKEN` is stored as a GitHub secret | Credentials never live in the repository. The Gitleaks job would catch them if they did. |
+| `requirements.txt` is hash-locked and installed with `--require-hashes` | `pip-compile --generate-hashes` records a SHA-256 for every package, so the build installs exactly the files I locked and nothing can be swapped. |
+| `--only-binary :all:` on every `pip install`, in the Dockerfile and in CI | Only prebuilt wheels are installed, so no package setup script runs on the runner or in the image. SonarQube flagged the CI steps that lacked it (see the second scan below). |
+| `packages: write` only on the `publish` job | The workflow default stays read-only. Only the job that pushes the image gets write access, and it runs only on `main` after every other job passes. |
+| Image tagged with the commit SHA, never `latest` | Each image maps to exactly one commit. |
+| Dependabot for Actions, pip and Docker | Pinned versions go stale. Dependabot opens pull requests that pass the same gates as any other change, and I review the release notes before merging. Its runs cannot read normal Actions secrets, so `SONAR_TOKEN` also exists under Settings, Secrets and variables, Dependabot. |
 
 ## Proof that it works: breaking the pipeline on purpose
 
@@ -239,7 +291,16 @@ The first scan reported 5 security findings, and the quality gate failed on one 
 | 2 | `ci.yml` | Use full commit SHA for this dependency | High | Fixed: action pinned to a SHA |
 | 3 | `app.py` | Make sure disabling CSRF protection is safe | High | Marked as accepted. The API has only read-only `GET` routes and no forms, cookies or sessions, so CSRF does not apply. |
 | 4 | `Dockerfile` | Omitting `--only-binary :all:` can run setup scripts | Medium | Fixed: flag added |
-| 5 | `Dockerfile` | Dependencies without locking resolved versions | Medium | Open. Planned: hash-locked requirements (see roadmap). |
+| 5 | `Dockerfile` | Dependencies without locking resolved versions | Medium | Fixed: `requirements.txt` is hash-locked with `pip-compile --generate-hashes` and installed with `--require-hashes`. |
+
+### Second scan, after adding tests and publishing
+
+After I added the unit tests, the coverage step and the publish job, the quality gate failed again on two conditions.
+
+| Condition | Cause | Fix |
+|---|---|---|
+| Security Rating on New Code was C (required A) | 4 issues in `ci.yml`: the new `pip install` steps lacked `--only-binary :all:` | Added the flag to every `pip install` in the workflow |
+| Coverage on New Code was 0.0% (required 80%) | Sonar never received a coverage report | The `sonarqube` job runs `pytest --cov=app --cov-report=xml`, and `sonar.python.coverage.reportPaths` points to it. Tests and generated files are excluded |
 
 ## Troubleshooting log
 
@@ -255,6 +316,9 @@ Real problems I hit while building this, and what each one taught me. The run hi
 | `sonarqube` job would have conflicted with Automatic Analysis | New SonarQube Cloud projects scan automatically by default. | Switched Automatic Analysis off before enabling CI-based analysis. | CI-based and automatic analysis cannot both be on. |
 | Wrong commit SHA on the `actions/checkout` line | The Sonar action's SHA was pasted onto the checkout step, where it does not exist. | Caught with `grep -n "uses:"` before pushing and corrected. | Verify that each SHA belongs to the right repository. |
 | YAML error reported on line 8, then line 14 | The `- name: Scan image with Trivy` step was indented less than the other steps. The parser reports the block it was reading, not the exact line. | Aligned the dash with the other steps in the list. | Look at the lines around the reported line, and check indentation with `cat -A`. |
+| Dependabot pull requests failed in about 30 seconds with "Not authorized or organization not found" | Dependabot runs cannot read normal Actions secrets, so `SONAR_TOKEN` was empty | Added the token under Settings, Secrets and variables, Dependabot | A secret has to exist in the right store for the actor that triggers the run. |
+| A Dependabot PR still showed a red check after the secret was fixed | The branch was already up to date, so no new commit and no new run | `@dependabot recreate` | Check the timestamps in a log before trusting it. |
+| Merge conflict in `requirements.in` on the second Python update | Two pull requests edited neighbouring lines | `@dependabot rebase` after merging the first | Merge dependency pull requests one at a time. |
 
 ## Run it locally
 
@@ -281,6 +345,21 @@ trivy image --severity HIGH,CRITICAL --ignore-unfixed devsecops-demo
 gitleaks detect --source . -v
 ```
 
+Run the unit tests:
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install --require-hashes -r requirements.txt
+pip install pytest
+pytest -q
+```
+
+Pull the image published by the pipeline (each run on `main` pushes one, tagged with the commit SHA):
+
+```bash
+docker pull ghcr.io/danishwani1999/devsecops-pipeline:<commit-sha>
+```
+
 ## Set it up on your own repo
 
 1. Fork or clone this repository.
@@ -303,15 +382,17 @@ gitleaks detect --source . -v
 **Limitations**
 
 - Gitleaks cannot post a comment on pull requests because the workflow token is read-only. The findings still appear in the job summary and the uploaded artifact.
-- Dependency versions are pinned, but not yet locked with hashes (SonarQube finding #5).
+- The image is published but not deployed anywhere yet.
+- Major-version Dependabot updates are reviewed by hand before merging.
 - Checks are not yet enforced by branch protection, so a direct push to `main` can bypass the pull request flow.
 
 **Roadmap**
 
-- [ ] Lock dependencies with hashes (`pip-compile --generate-hashes`, then `pip install --require-hashes`)
+- [x] Lock dependencies with hashes (`pip-compile --generate-hashes`, then `pip install --require-hashes`)
 - [ ] Enable branch protection so the three checks are required before merging
-- [ ] Add Dependabot to keep pinned actions and dependencies up to date
-- [ ] Publish the image to GitHub Container Registry after all scans pass on `main`
+- [x] Add Dependabot to keep pinned actions and dependencies up to date
+- [x] Publish the image to GitHub Container Registry after all scans pass on `main`
+- [ ] Deploy the published image with Argo CD from the GitOps repo
 
 ## What I learned
 
@@ -319,6 +400,7 @@ gitleaks detect --source . -v
 - How supply-chain attacks work in practice, and why pinning third-party actions to commit SHAs matters.
 - How to read scanner output: rule IDs, CVE records, installed versus fixed versions, and what `ignore-unfixed` changes.
 - How to debug a pipeline by reading the logs and diffs line by line, instead of guessing.
+- How hash locking and wheel-only installs reduce install-time risk, and why Dependabot runs need their own secrets.
 
 ## Author
 
