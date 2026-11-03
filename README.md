@@ -217,7 +217,7 @@ jobs:
 
 | Decision | Why |
 |---|---|
-| Third-party actions are pinned to a full commit SHA, with the version in a comment | Tags such as `@v2` can be moved to different code. A SHA cannot. SonarQube flagged this as a High security issue, and in March 2026 tags of `aquasecurity/trivy-action` were force-pushed to malicious code ([advisory](https://github.com/aquasecurity/trivy/security/advisories/GHSA-69fq-xp46-6x23)). I pinned Trivy to `v0.35.0`, the version that advisory lists as safe. |
+| Third-party actions are pinned to a full commit SHA, with the version in a comment | Tags such as `@v2` can be moved to different code. A SHA cannot. SonarQube flagged this as a High security issue, and in March 2026 tags of `aquasecurity/trivy-action` were force-pushed to malicious code ([advisory](https://github.com/aquasecurity/trivy/security/advisories/GHSA-69fq-xp46-6x23)). I pin `aquasecurity/trivy-action` to a full commit SHA (currently `v0.36.0`) and let Dependabot propose updates. |
 | `permissions: contents: read` on the workflow | Least privilege. The jobs only need to read the repository, so a compromised step cannot write to it. |
 | `pip install --only-binary :all:` in the Dockerfile | Installs prebuilt packages only, so no package setup script runs during the image build. |
 | Container runs as a non-root user (`appuser`) | Limits the damage if the app is compromised. |
